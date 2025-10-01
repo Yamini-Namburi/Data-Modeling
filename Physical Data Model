@@ -1,0 +1,175 @@
+-- ============================================================================
+--  SCHEMA
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS globalcart_dw;
+SET search_path TO globalcart_dw;
+
+-- ============================================================================
+--  DIMENSIONS
+-- ============================================================================
+
+-- ------------------------
+-- DIM_DATE 
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_date (
+    date_key              INTEGER      NOT NULL,          
+    full_date             DATE         NOT NULL,
+    day                   SMALLINT     NOT NULL,
+    day_of_week_num       SMALLINT     NOT NULL,
+    day_of_week_name      VARCHAR(10)  NOT NULL,
+    is_weekend_flag       BOOLEAN      NOT NULL,
+    week_of_year          SMALLINT     NOT NULL,
+    month_num             SMALLINT     NOT NULL,
+    month_name            VARCHAR(10)  NOT NULL,
+    quarter_num           SMALLINT     NOT NULL,
+    quarter_name          VARCHAR(6)   NOT NULL,
+    year                  SMALLINT     NOT NULL,
+    fiscal_month_num      SMALLINT,
+    fiscal_quarter_num    SMALLINT,
+    fiscal_year           SMALLINT,
+    CONSTRAINT pk_dim_date PRIMARY KEY (date_key)
+)
+DISTSTYLE ALL
+SORTKEY (date_key);
+
+-- ------------------------
+-- DIM_CUSTOMER SCD2
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_customer (
+    customer_key          BIGINT       IDENTITY(1,1)   NOT NULL,
+    customer_id           VARCHAR(64)  NOT NULL,   -- natural/business key
+    full_name             VARCHAR(256),
+    first_name            VARCHAR(128),
+    last_name             VARCHAR(128),
+    email                 VARCHAR(256),
+    phone                 VARCHAR(64),
+    customer_segment      VARCHAR(64),
+    loyalty_tier          VARCHAR(64),
+    signup_date           DATE,
+    valid_from            DATE         NOT NULL,
+    valid_to              DATE,                      -- NULL = current
+    is_current            BOOLEAN      NOT NULL,
+    CONSTRAINT pk_dim_customer PRIMARY KEY (customer_key)
+)
+DISTSTYLE EVEN;
+
+-- ------------------------
+-- DIM_PRODUCT SCD2
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_product (
+    product_key           BIGINT       IDENTITY(1,1)   NOT NULL,
+    product_id            VARCHAR(64)  NOT NULL,   -- natural/SKU
+    product_name          VARCHAR(256),
+    brand                 VARCHAR(128),
+    category              VARCHAR(128),             
+    current_list_price    DECIMAL(18,2),
+    model_number          VARCHAR(128),
+    color                 VARCHAR(64),
+    size                  VARCHAR(64),
+    is_active             BOOLEAN,
+    release_date          DATE,
+    discontinue_date      DATE,
+    valid_from            DATE         NOT NULL,
+    valid_to              DATE,
+    is_current            BOOLEAN      NOT NULL,
+    CONSTRAINT pk_dim_product PRIMARY KEY (product_key)
+)
+DISTSTYLE KEY
+DISTKEY (product_key)
+COMPOUND SORTKEY (product_id, valid_from);   -- speeds point-in-time SCD lookups
+
+-- ------------------------
+-- DIM_SHIPPING_ADDRESS 
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_shipping_address (
+    shipping_address_key  BIGINT       IDENTITY(1,1)   NOT NULL,
+    recipient_name        VARCHAR(256),
+    address_line1         VARCHAR(256),
+    address_line2         VARCHAR(256),
+    city                  VARCHAR(128),
+    state_province        VARCHAR(128),
+    postal_code           VARCHAR(32),
+    country               VARCHAR(64),
+    phone                 VARCHAR(64),
+    region                VARCHAR(64),
+    CONSTRAINT pk_dim_shipping_address PRIMARY KEY (shipping_address_key)
+)
+DISTSTYLE EVEN;
+
+-- ------------------------
+-- DIM_ORDER_STATUS 
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_order_status (
+    order_status_key      SMALLINT     IDENTITY(1,1)   NOT NULL,
+    order_status          VARCHAR(32)  NOT NULL,   
+    CONSTRAINT pk_dim_order_status PRIMARY KEY (order_status_key)
+)
+DISTSTYLE ALL;
+
+-- ------------------------
+-- DIM_SALES_CHANNEL 
+-- ------------------------
+CREATE TABLE IF NOT EXISTS dim_sales_channel (
+    sales_channel_key     SMALLINT     IDENTITY(1,1)   NOT NULL,
+    sales_channel_name    VARCHAR(32)  NOT NULL,   
+    CONSTRAINT pk_dim_sales_channel PRIMARY KEY (sales_channel_key)
+)
+DISTSTYLE ALL;
+
+-- ============================================================================
+--  FACT (central) — grain: one row per ORDER_ITEM at order time
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS fact_order_item (
+    -- Foreign Keys
+    date_key                  INTEGER       NOT NULL,
+    ship_date_key             INTEGER,
+    customer_key              BIGINT        NOT NULL,
+    product_key               BIGINT        NOT NULL,
+    shipping_address_key      BIGINT        NOT NULL,
+    order_status_key          SMALLINT,
+    sales_channel_key         SMALLINT,
+
+    -- Degenerate dimensions from ORDER
+    order_id                  VARCHAR(64)   NOT NULL,
+    order_line_number         INTEGER       NOT NULL,
+    invoice_number            VARCHAR(64),
+    promo_code                VARCHAR(64),
+    shipment_tracking_number  VARCHAR(64),
+    payment_reference         VARCHAR(64),
+
+    -- Measures
+    quantity_sold             INTEGER       NOT NULL,
+    unit_price                DECIMAL(18,2) NOT NULL,
+    gross_item_amount         DECIMAL(18,2) NOT NULL, 
+    discount_amount           DECIMAL(18,2),
+    item_tax_amount           DECIMAL(18,2),
+    allocated_shipping_amount DECIMAL(18,2),
+    net_item_sales_amount     DECIMAL(18,2) NOT NULL, 
+    total_item_revenue        DECIMAL(18,2) NOT NULL, 
+
+    -- Metadata (optional)
+    load_batch_id             BIGINT,
+    created_at_utc            TIMESTAMP,
+
+    -- FK declarations (optimizer hints)
+    CONSTRAINT fk_foi_order_date
+        FOREIGN KEY (date_key)             REFERENCES dim_date(date_key),
+    CONSTRAINT fk_foi_ship_date
+        FOREIGN KEY (ship_date_key)        REFERENCES dim_date(date_key),
+    CONSTRAINT fk_foi_customer
+        FOREIGN KEY (customer_key)         REFERENCES dim_customer(customer_key),
+    CONSTRAINT fk_foi_product
+        FOREIGN KEY (product_key)          REFERENCES dim_product(product_key),
+    CONSTRAINT fk_foi_shipaddr
+        FOREIGN KEY (shipping_address_key) REFERENCES dim_shipping_address(shipping_address_key),
+    CONSTRAINT fk_foi_status
+        FOREIGN KEY (order_status_key)     REFERENCES dim_order_status(order_status_key),
+    CONSTRAINT fk_foi_channel
+        FOREIGN KEY (sales_channel_key)    REFERENCES dim_sales_channel(sales_channel_key)
+
+    -- Document grain-level uniqueness if useful:
+    -- UNIQUE (order_id, order_line_number)
+)
+DISTSTYLE KEY
+DISTKEY (product_key)
+COMPOUND SORTKEY (date_key, order_id);
